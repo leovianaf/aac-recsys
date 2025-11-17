@@ -1,0 +1,32 @@
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "aac_recsys"
+version = "0.0.1"
+description = "A context-aware recommendation pipeline for AAC, combining TensorFlow Lite inference, DBSCAN location clustering, fuzzy temporal modeling, and probabilistic ranking to generate personalized pictogram suggestions."
+authors = [
+  { name = "Beatriz Silva \u0026 Leonardo Viana" },
+]
+license = { file = "LICENSE" }
+readme = "README.md"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License"
+]
+requires-python = "==3.11.5"
+
+
+[tool.ruff]
+line-length = 99
+src = ["aac_recsys"]
+include = ["pyproject.toml", "aac_recsys/**/*.py"]
+
+[tool.ruff.lint]
+extend-select = ["I"]  # Add import sorting
+
+[tool.ruff.lint.isort]
+known-first-party = ["aac_recsys"]
+force-sort-within-sections = true
+
