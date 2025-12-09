@@ -22,6 +22,7 @@ This script:
 """
 
 import os
+from pathlib import Path
 from typing import Tuple, List
 
 import joblib
@@ -33,18 +34,17 @@ from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 from dotenv import load_dotenv
 
 
-# ----------------------------------------------------------------------
 # Constants
-# ----------------------------------------------------------------------
-
 EARTH_RADIUS_METERS = 6_371_000
 REQUIRED_COLUMNS = ['user_uuid', 'click_location', 'card_written_text', 'event_timestamp']
 
+# Directory Paths
+FILE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = FILE_DIR.parent
+PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 
-# ----------------------------------------------------------------------
+
 # Helper Functions
-# ----------------------------------------------------------------------
-
 def get_period_of_day(hour: int) -> str:
     """
     Map an hour of day [0–23] to a coarse time period bucket.
@@ -138,7 +138,7 @@ def assign_test_clusters(
 
     for i, (dist, idx) in enumerate(zip(dists, indices)):
         if dist < eps_rad:
-            df_out.iloc[i, cluster_col_idx] = train_df.iloc[idx]['cluster']
+            df_out.iloc[i, cluster_col_idx] = train_df.iloc[idx]['cluster'] # type: ignore
 
     return df_out
 
@@ -166,10 +166,7 @@ def generate_user_clusters(
     return df_train_clustered, df_test_clustered
 
 
-# ----------------------------------------------------------------------
 # Main Pipeline
-# ----------------------------------------------------------------------
-
 def main() -> None:
     """
     Execute the full preprocessing pipeline:
@@ -177,10 +174,8 @@ def main() -> None:
     """
     load_dotenv()
     print("\n--- Starting Preprocessing Pipeline ---\n")
-    # --------------------------------------------------------------
+
     # 1. Load dataset
-    # --------------------------------------------------------------
-    
     gs_url = os.getenv("GS_DATASET_URL")
 
     if not gs_url:
@@ -199,17 +194,13 @@ def main() -> None:
     except Exception as e:
         raise RuntimeError(f"Failed to load parquet file: {e}")
 
-    # --------------------------------------------------------------
     # 2. Remove rows with missing critical columns
-    # --------------------------------------------------------------
     df_clean = df.dropna(subset=REQUIRED_COLUMNS).copy()
 
     print(f"Total rows before cleaning: {len(df):,}")
     print(f"Total rows after cleaning:  {len(df_clean):,}")
 
-    # --------------------------------------------------------------
     # 3. Temporal feature engineering
-    # --------------------------------------------------------------
     # Extract datetime from event_timestamp (microseconds)
     df_clean["datetime"] = pd.to_datetime(
         df_clean["event_timestamp"],
@@ -218,16 +209,16 @@ def main() -> None:
     )
 
     # Day of week (e.g. Monday, Tuesday, ...)
-    df_clean["week_day"] = df_clean["datetime"].dt.day_name()
+    df_clean["week_day"] = df_clean["datetime"].dt.day_name() # type: ignore
 
     # Hour of the day [0–23]
-    df_clean["hour"] = df_clean["datetime"].dt.hour
+    df_clean["hour"] = df_clean["datetime"].dt.hour # type: ignore
 
     # Year (used for week ordering)
-    df_clean["year_num"] = df_clean["datetime"].dt.year
+    df_clean["year_num"] = df_clean["datetime"].dt.year # type: ignore
 
     # ISO week number [1–52]
-    df_clean["week_num"] = df_clean["datetime"].dt.isocalendar().week
+    df_clean["week_num"] = df_clean["datetime"].dt.isocalendar().week # type: ignore
 
     # Week order identifier (year-week) as an ordered categorical
     df_clean["week_order"] = (
@@ -261,18 +252,14 @@ def main() -> None:
     # Drop intermediate datetime column
     df_clean = df_clean.drop(columns=["datetime"])
 
-    # --------------------------------------------------------------
     # 4. User filtering: enforce activity and diversity constraints
-    # --------------------------------------------------------------
     print("\n--- BEFORE FILTERING ---")
     print(f"Total rows:           {df_clean.shape[0]:,}")
     print(f"Unique users:         {df_clean['user_uuid'].nunique():,}")
 
     df_filtered = df_clean.copy()
 
-    # ----------------------------------------------------------
     # Filter 1: Minimum 50 clicks per user
-    # ----------------------------------------------------------
     print("\n>>> FILTER 1: Minimum 50 clicks per user")
     rows_before = df_filtered.shape[0]
     users_before = df_filtered["user_uuid"].nunique()
@@ -288,9 +275,7 @@ def main() -> None:
         f"{df_filtered['user_uuid'].nunique():,} users"
     )
 
-    # ----------------------------------------------------------
     # Filter 2: Minimum 10 distinct click locations per user
-    # ----------------------------------------------------------
     print("\n>>> FILTER 2: Minimum 10 distinct click locations per user")
     rows_before = df_filtered.shape[0]
     users_before = df_filtered["user_uuid"].nunique()
@@ -306,9 +291,7 @@ def main() -> None:
         f"{df_filtered['user_uuid'].nunique():,} users"
     )
 
-    # ----------------------------------------------------------
     # Filter 3: Minimum 20 distinct click hours per user
-    # ----------------------------------------------------------
     print("\n>>> FILTER 3: Minimum 20 distinct click hours per user")
     rows_before = df_filtered.shape[0]
     users_before = df_filtered["user_uuid"].nunique()
@@ -324,9 +307,7 @@ def main() -> None:
         f"{df_filtered['user_uuid'].nunique():,} users"
     )
 
-    # ----------------------------------------------------------
     # Filter 4: Minimum 1000 clicks per user
-    # ----------------------------------------------------------
     print("\n>>> FILTER 4: Minimum 1000 clicks per user")
     rows_before = df_filtered.shape[0]
     users_before = df_filtered["user_uuid"].nunique()
@@ -342,9 +323,7 @@ def main() -> None:
         f"{df_filtered['user_uuid'].nunique():,} users"
     )
 
-    # ----------------------------------------------------------
     # Filter 5: Minimum 3 distinct weeks of usage per user
-    # ----------------------------------------------------------
     print("\n>>> FILTER 5: Minimum 3 weeks of usage per user")
     rows_before = df_filtered.shape[0]
     users_before = df_filtered["user_uuid"].nunique()
@@ -360,16 +339,12 @@ def main() -> None:
         f"{df_filtered['user_uuid'].nunique():,} users"
     )
 
-    # --------------------------------------------------------------
     # Final state after filtering
-    # --------------------------------------------------------------
     print("\n--- FINAL FILTERED DATASET STATE ---")
     print(f"Total rows:      {df_filtered.shape[0]:,}")
     print(f"Unique users:    {df_filtered['user_uuid'].nunique():,}")
 
-    # --------------------------------------------------------------
     # 5. Normalize card text (lowercase) and select relevant columns
-    # --------------------------------------------------------------
     df_filtered["card_written_text"] = df_filtered["card_written_text"].apply(
         lambda s: s.lower() if isinstance(s, str) else s
     )
@@ -389,13 +364,12 @@ def main() -> None:
     df_filtered = df_filtered.loc[:, selected_columns]
 
     # Save intermediate filtered dataset
-    filtered_parquet_path = "../data/processed/df_filtered.parquet"
+    filtered_parquet_path = PROCESSED_DIR / "df_filtered.parquet"
+    os.makedirs(PROCESSED_DIR, exist_ok=True)
     df_filtered.to_parquet(filtered_parquet_path, index=False)
     print(f"\nFiltered DataFrame saved to: {filtered_parquet_path}")
 
-    # --------------------------------------------------------------
     # 6. Parse geolocation coordinates (latitude/longitude)
-    # --------------------------------------------------------------
     location_coords = df_filtered["click_location"].astype(str).str.split(",", expand=True)
     df_filtered["latitude"] = pd.to_numeric(location_coords[0], errors="coerce")
     df_filtered["longitude"] = pd.to_numeric(location_coords[1], errors="coerce")
@@ -403,9 +377,7 @@ def main() -> None:
     # Drop rows with invalid coordinates
     df_filtered = df_filtered.dropna(subset=["latitude", "longitude"])
 
-    # --------------------------------------------------------------
     # 7. Prepare global encoders (users)
-    # --------------------------------------------------------------
     print("\n--- Preparing Global User Encoder ---")
     global_encoder_path = "../models/global_encoders"
     os.makedirs(global_encoder_path, exist_ok=True)
@@ -418,9 +390,7 @@ def main() -> None:
         f"Total users: {len(le_user.classes_)}"
     )
 
-    # --------------------------------------------------------------
     # 8. Train/test split per user, clustering, and encoding
-    # --------------------------------------------------------------
     train_parts: List[pd.DataFrame] = []
     test_parts: List[pd.DataFrame] = []
     train_parts_for_viz: List[pd.DataFrame] = []
@@ -457,18 +427,14 @@ def main() -> None:
         if df_train.empty or df_test.empty:
             continue
 
-        # ----------------------------------------------------------
         # Spatial clustering per user
-        # ----------------------------------------------------------
         df_train, df_test = generate_user_clusters(df_train, df_test)
 
         # Store train subset for cluster visualization
         df_train["user_uuid_enc"] = le_user.transform(df_train["user_uuid"])
         train_parts_for_viz.append(df_train.copy())
 
-        # ----------------------------------------------------------
         # Encoders: card + user + contextual one-hot
-        # ----------------------------------------------------------
         print("   - Applying encoders...")
 
         # 1) Card encoder (per user)
@@ -491,7 +457,7 @@ def main() -> None:
         for df_part, name in [(df_train, "train"), (df_test, "test")]:
             ctx_encoded = ohe_ctx.transform(df_part[context_cols])
             feature_names = ohe_ctx.get_feature_names_out(context_cols)
-            df_encoded = pd.DataFrame(ctx_encoded, columns=feature_names, index=df_part.index)
+            df_encoded = pd.DataFrame(ctx_encoded, columns=feature_names, index=df_part.index) # type: ignore
 
             # Drop original text and categorical context columns
             df_part = df_part.drop(columns=["card_written_text", "user_uuid"] + context_cols)
@@ -506,9 +472,7 @@ def main() -> None:
             else:
                 test_parts.append(df_final_user)
 
-    # --------------------------------------------------------------
     # 9. Concatenate all users and save global datasets
-    # --------------------------------------------------------------
     print("\n--- Concatenating and saving final train/test datasets ---")
     df_train_final = pd.concat(train_parts, ignore_index=True)
     df_test_final = pd.concat(test_parts, ignore_index=True)
@@ -531,9 +495,7 @@ def main() -> None:
     print(f"Final test size:  {len(df_test_final):,} rows")
 
 
-# ----------------------------------------------------------------------
 # Entry Point
-# ----------------------------------------------------------------------
 
 if __name__ == "__main__":
     main()
