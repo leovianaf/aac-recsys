@@ -399,7 +399,7 @@ def main() -> None:
     user_list = df_filtered_sorted["user_uuid"].unique()
 
     for i, user_id in enumerate(user_list):
-        print(f"\n--- Processing user_{i} (uuid={user_id}) ---")
+        print(f"\n--- Processing user_{i} ---")
         user_model_path = f"../models/user_{i}"
         os.makedirs(user_model_path, exist_ok=True)
 
@@ -429,6 +429,9 @@ def main() -> None:
 
         # Spatial clustering per user
         df_train, df_test = generate_user_clusters(df_train, df_test)
+        print("   - Spatial clustering completed.")
+        print(f"   - Total clusters found in train: {df_train['cluster'].nunique() - (1 if -1 in df_train['cluster'].values else 0)}")
+        print(f"   - Total clusters assigned in test: {df_test['cluster'].nunique() - (1 if -1 in df_test['cluster'].values else 0)}")
 
         # Store train subset for cluster visualization
         df_train["user_uuid_enc"] = le_user.transform(df_train["user_uuid"])
