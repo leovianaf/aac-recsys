@@ -22,8 +22,10 @@ This script:
 """
 
 import os
+import json
 from pathlib import Path
-from typing import Tuple, List
+from typing import Tuple, List, Optional, Dict, Any
+from math import radians, sin, cos, sqrt, atan2
 
 import joblib
 import numpy as np
@@ -33,9 +35,11 @@ from sklearn.neighbors import BallTree
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 from dotenv import load_dotenv
 
-
 # Constants
-EARTH_RADIUS_METERS = 6_371_000
+EARTH_RADIUS_METERS = 6_373_000
+EPS_METERS = 400
+EPS_KM = EPS_METERS / 1000
+MIN_SAMPLES = 3
 REQUIRED_COLUMNS = ['user_uuid', 'click_location', 'card_written_text', 'event_timestamp']
 
 # Directory Paths
@@ -45,29 +49,196 @@ PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 
 
 # Helper Functions
-def get_period_of_day(hour: int) -> str:
+
+def spatial_cell(lat, lon, precision=3):
     """
-    Map an hour of day [0–23] to a coarse time period bucket.
+    Create a coarse spatial cell id by rounding coordinates.
+    precision=3 ≈ 100m–150m
+    """
+    return f"{round(lat, precision)}_{round(lon, precision)}"
+
+
+def haversine_distance_km(
+    user_lat: float,
+    user_lng: float,
+    lat: float,
+    lng: float,
+) -> float:
+    """
+    Compute the Haversine (great-circle) distance between two points.
+
+    Matches the original Kotlin implementation:
+    - Earth radius = 6373.0 km
+    - Returns distance in kilometers
+    """
+    earth_radius_km = 6373.0
+
+    d_lat = radians(lat - user_lat)
+    d_lng = radians(lng - user_lng)
+
+    a = (
+        sin(d_lat / 2) ** 2
+        + cos(radians(user_lat))
+        * cos(radians(lat))
+        * sin(d_lng / 2) ** 2
+    )
+
+    c = 2 * atan2(sqrt(a), sqrt(1 - a))
+    return earth_radius_km * c
+
+
+def load_location_vocab(
+    path: str | Path,
+    *,
+    user_uuid: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Load location vocabulary (cluster centroids) from JSON.
+
+    Optionally filters by user_uuid.
+    """
+    path = Path(path)
+    records = json.loads(path.read_text(encoding="utf-8"))
+
+    if user_uuid is not None:
+        records = [
+            r for r in records
+            if str(r.get("user_uuid")) == str(user_uuid)
+        ]
+
+    return records
+
+
+def load_location_vocab_df(vocab_path: str | Path) -> pd.DataFrame:
+    """
+    Loads location_vocab_user.json into a DataFrame with columns:
+    ['lat', 'lng', 'clustering', 'user_uuid'].
+    """
+    vocab_path = Path(vocab_path)
+    records = json.loads(vocab_path.read_text(encoding="utf-8"))
+    return pd.DataFrame(records)
+
+
+def gaussian_membership(x: float, center: float, sigma: float) -> float:
+    return float(np.exp(-((x - center) ** 2) / (2 * (sigma ** 2))))
+
+
+def compute_fuzzy_time_memberships(hour: int) -> dict[str, float]:
+    return {
+        "dawn": gaussian_membership(hour, 2.5, 2.0),
+        "morn": gaussian_membership(hour, 7.5, 2.0),
+        "noon": gaussian_membership(hour, 11.5, 2.0),
+        "aftn": gaussian_membership(hour, 13.5, 2.0),
+        "even": gaussian_membership(hour, 17.5, 2.0),
+        "nght": gaussian_membership(hour, 22.5, 2.0),
+    }
+
+
+def assign_clusters_by_centroids(
+    df_points: pd.DataFrame,
+    vocab_df: pd.DataFrame,
+    eps_meters: float = 400,
+) -> pd.DataFrame:
+    """
+    Assign cluster to each point using nearest centroid (hotspot) + eps threshold.
+    Returns df with a 'cluster' column (cluster id or -1).
+    """
+    if vocab_df.empty:
+        out = df_points.copy()
+        out["cluster"] = -1
+        return out
+
+    centroids_rad = np.radians(vocab_df[["lat", "lng"]].to_numpy())
+    points_rad = np.radians(df_points[["latitude", "longitude"]].to_numpy())
+
+    tree = BallTree(centroids_rad, metric="haversine")
+    dists_rad, idxs = tree.query(points_rad, k=1)
+
+    eps_rad = eps_meters / EARTH_RADIUS_METERS
+
+    out = df_points.copy()
+    out["cluster"] = -1
+
+    # idxs shape: (n,1) -> flatten
+    idxs = idxs.reshape(-1)
+    dists_rad = dists_rad.reshape(-1)
+
+    within = dists_rad <= eps_rad
+    # vocab_df['clustering'] é o id do cluster
+    out.loc[within, "cluster"] = vocab_df.loc[idxs[within], "clustering"].astype(int).to_numpy()
+
+    return out
+
+
+def quantize_location(
+    lat: float,
+    lon: float,
+    *,
+    vocab_path: str | Path,
+    user_uuid: Optional[str] = None,
+) -> Tuple[Optional[int], float]:
+    """
+    Assign a location to the nearest spatial cluster centroid.
 
     Args:
-        hour (int): Hour of day in 24h format.
+        lat (float): Latitude of the query point
+        lon (float): Longitude of the query point
+        vocab_path (str | Path): Path to location_vocab_user.json
+        user_uuid (Optional[str]): Filter clusters by user if needed
 
     Returns:
-        str: One of {'midnight', 'dawn', 'morning', 'noon', 'afternoon', 'evening', 'night'}.
+        (cluster_id, distance_km)
+        - cluster_id: value from 'clustering' field
+        - distance_km: Haversine distance in kilometers
     """
-    if 6 <= hour <= 8:
-        return "dawn"
-    if 9 <= hour <= 11:
-        return "morning"
-    if 12 <= hour <= 14:
-        return "noon"
-    if 15 <= hour <= 17:
-        return "afternoon"
-    if 18 <= hour <= 20:
-        return "evening"
-    if 21 <= hour <= 23:
-        return "night"
-    return "midnight"
+    hotspots = load_location_vocab(vocab_path, user_uuid=user_uuid)
+
+    if not hotspots:
+        return None, float("inf")
+
+    best_cluster = None
+    best_distance = float("inf")
+
+    for h in hotspots:
+        h_lat = float(h["lat"])
+        h_lng = float(h["lng"])
+
+        distance = haversine_distance_km(
+            user_lat=lat,
+            user_lng=lon,
+            lat=h_lat,
+            lng=h_lng,
+        )
+
+        if distance < best_distance:
+            best_distance = distance
+            best_cluster = int(h["clustering"])
+
+    return best_cluster, best_distance
+
+def quantize_location_with_threshold(
+    lat: float,
+    lon: float,
+    *,
+    vocab_path: str | Path,
+    max_distance_km: float = 0.4,  # 400 meters
+    user_uuid: Optional[str] = None,
+) -> int:
+    """
+    Quantize location with a maximum distance threshold.
+    Returns -1 if no cluster is close enough.
+    """
+    cluster_id, distance_km = quantize_location(
+        lat,
+        lon,
+        vocab_path=vocab_path,
+        user_uuid=user_uuid,
+    )
+
+    if distance_km > max_distance_km:
+        return -1
+
+    return cluster_id
 
 
 def clusterize_locations(
@@ -142,28 +313,70 @@ def assign_test_clusters(
 
     return df_out
 
+def save_user_location_vocab(
+    df_train_clustered: pd.DataFrame,
+    *,
+    user_uuid: str,
+    output_path: str,
+) -> None:
+    """
+    Save per-user cluster centroids (mean lat/lng) to a JSON file.
 
-def generate_user_clusters(
-    df_train: pd.DataFrame,
-    df_test: pd.DataFrame
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    Output schema (list of dicts):
+        - lat (float)
+        - lng (float)
+        - clustering (int)  # cluster id
+        - user_uuid (str)
+
+    Notes:
+        - Noise points (cluster == -1) are excluded.
+        - Uses mean latitude/longitude per cluster.
+    """
+    vocab_df = (
+        df_train_clustered.loc[df_train_clustered["cluster"] != -1, ["latitude", "longitude", "cluster"]]
+        .groupby("cluster", as_index=False)
+        .agg(lat=("latitude", "mean"), lng=("longitude", "mean"))
+    )
+
+    vocab_df["clustering"] = vocab_df["cluster"].astype(int)
+    vocab_df["user_uuid"] = user_uuid
+    vocab_df = vocab_df.drop(columns=["cluster"])
+
+    records = vocab_df.to_dict(orient="records")
+
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    with out.open("w", encoding="utf-8") as f:
+        json.dump(records, f, ensure_ascii=False, indent=2)
+
+
+def generate_user_clusters(df_train: pd.DataFrame, *, user_uuid: Optional[str]=None, vocab_output_path: Optional[str]=None) -> pd.DataFrame:
     """
     Run DBSCAN-based spatial clustering on train data and propagate cluster labels to test data.
 
-    Args:
-        df_train (pd.DataFrame): User-specific training subset, including 'latitude'
-                                 and 'longitude' columns.
-        df_test (pd.DataFrame): User-specific test subset, including 'latitude'
-                                and 'longitude' columns.
-
-    Returns:
-        tuple[pd.DataFrame, pd.DataFrame]:
-            - Training DataFrame with 'cluster' labels assigned by DBSCAN.
-            - Test DataFrame with cluster labels inferred by nearest neighbor matching.
+    Optionally saves per-user cluster centroids to a JSON vocabulary file.
     """
-    df_train_clustered = clusterize_locations(df_train)
-    df_test_clustered = assign_test_clusters(df_train_clustered, df_test)
-    return df_train_clustered, df_test_clustered
+    # Cluster train
+    df_train_clustered = clusterize_locations(df_train, eps_meters=EPS_METERS, min_samples=MIN_SAMPLES)
+
+    # Save vocab if requested
+    if vocab_output_path is not None:
+        if user_uuid is None:
+            if "user_uuid" not in df_train_clustered.columns:
+                raise ValueError(
+                    "user_uuid not provided and 'user_uuid' column not found in df_train."
+                )
+            user_uuid = str(df_train_clustered["user_uuid"].iloc[0])
+
+        save_user_location_vocab(
+            df_train_clustered,
+            user_uuid=user_uuid,
+            output_path=vocab_output_path,
+        )
+
+    # Propagate to test
+    return df_train_clustered
 
 
 # Main Pipeline
@@ -201,15 +414,15 @@ def main() -> None:
     print(f"Total rows after cleaning:  {len(df_clean):,}")
 
     # 3. Temporal feature engineering
-    # Extract datetime from event_timestamp (microseconds)
-    df_clean["datetime"] = pd.to_datetime(
-        df_clean["event_timestamp"],
-        unit="us",
-        errors="coerce"
+    # Parse timestamp as UTC and convert to production timezone
+    df_clean["datetime"] = (
+        pd.to_datetime(df_clean["event_timestamp"], unit="us", utc=True, errors="coerce")
+        .dt.tz_convert("America/Recife")
     )
 
     # Day of week (e.g. Monday, Tuesday, ...)
     df_clean["week_day"] = df_clean["datetime"].dt.day_name() # type: ignore
+    df_clean["weekday_prod"] = (df_clean["datetime"].dt.dayofweek + 1) % 7
 
     # Hour of the day [0–23]
     df_clean["hour"] = df_clean["datetime"].dt.hour # type: ignore
@@ -230,24 +443,8 @@ def main() -> None:
         ordered=True,
     )
 
-    # Period of day (midnight, dawn, morning, etc.)
-    df_clean["period_day"] = df_clean["hour"].apply(get_period_of_day)
-
-    # Custom ordered categories for period of day
-    period_order = [
-        "midnight",
-        "dawn",
-        "morning",
-        "noon",
-        "afternoon",
-        "evening",
-        "night",
-    ]
-    df_clean["period_day"] = pd.Categorical(
-        df_clean["period_day"],
-        categories=period_order,
-        ordered=True,
-    )
+    fuzzy_df = df_clean["hour"].apply(compute_fuzzy_time_memberships).apply(pd.Series)
+    df_clean = pd.concat([df_clean, fuzzy_df], axis=1)
 
     # Drop intermediate datetime column
     df_clean = df_clean.drop(columns=["datetime"])
@@ -349,6 +546,11 @@ def main() -> None:
         lambda s: s.lower() if isinstance(s, str) else s
     )
 
+    location_coords = df_filtered["click_location"].astype(str).str.split(",", expand=True)
+    df_filtered["latitude"] = pd.to_numeric(location_coords[0], errors="coerce")
+    df_filtered["longitude"] = pd.to_numeric(location_coords[1], errors="coerce")
+    df_filtered = df_filtered.dropna(subset=["latitude", "longitude"])
+
     selected_columns = [
         "user_uuid",
         "click_location",
@@ -359,7 +561,10 @@ def main() -> None:
         "year_num",
         "week_num",
         "week_order",
-        "period_day",
+        "weekday_prod",
+        "dawn", "morn", "noon", "aftn", "even", "nght",
+        "latitude",
+        "longitude",
     ]
     df_filtered = df_filtered.loc[:, selected_columns]
 
@@ -368,14 +573,6 @@ def main() -> None:
     os.makedirs(PROCESSED_DIR, exist_ok=True)
     df_filtered.to_parquet(filtered_parquet_path, index=False)
     print(f"\nFiltered DataFrame saved to: {filtered_parquet_path}")
-
-    # 6. Parse geolocation coordinates (latitude/longitude)
-    location_coords = df_filtered["click_location"].astype(str).str.split(",", expand=True)
-    df_filtered["latitude"] = pd.to_numeric(location_coords[0], errors="coerce")
-    df_filtered["longitude"] = pd.to_numeric(location_coords[1], errors="coerce")
-
-    # Drop rows with invalid coordinates
-    df_filtered = df_filtered.dropna(subset=["latitude", "longitude"])
 
     # 7. Prepare global encoders (users)
     print("\n--- Preparing Global User Encoder ---")
@@ -398,23 +595,50 @@ def main() -> None:
     df_filtered_sorted = df_filtered.sort_values(["user_uuid", "event_timestamp"])
     user_list = df_filtered_sorted["user_uuid"].unique()
 
+    print('\n--- Processing Each User Individually ---')
+    import logging
+
+    # Configure logger
+    logging.basicConfig(
+        filename="preprocessing.log",
+        filemode="w",  # overwrite each run
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s"
+    )
+
+    # Also print to terminal
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    console.setFormatter(formatter)
+
+    logging.getLogger().addHandler(console)
+
     for i, user_id in enumerate(user_list):
-        print(f"\n--- Processing user_{i} ---")
+        logging.info(f"--- Processing user_{i} (UUID={user_id}) ---")
+
         user_model_path = f"../models/user_{i}"
         os.makedirs(user_model_path, exist_ok=True)
 
         # User-specific subset
         df_u = df_filtered_sorted[df_filtered_sorted["user_uuid"] == user_id]
+        logging.info(f"   User rows: {len(df_u):,}")
 
-        # Card LabelEncoder (per user, fit on all user data)
-        le_card_user = LabelEncoder().fit(df_u["card_written_text"])
-        joblib.dump(le_card_user, os.path.join(user_model_path, "label_encoder_card.pkl"))
-        print(f"   - Card LabelEncoder trained and saved at {user_model_path}")
+        # Card LabelEncoder (per user)
+        try:
+            le_card_user = LabelEncoder().fit(df_u["card_written_text"])
+            joblib.dump(le_card_user, os.path.join(user_model_path, "label_encoder_card.pkl"))
+            logging.info("   - Card LabelEncoder trained successfully.")
+        except Exception as e:
+            logging.error(f"   ERROR training LabelEncoder for user_{i}: {e}")
+            continue
 
         # Week-based train/test split
         weeks = sorted(df_u["week_order"].unique())
+        logging.info(f"   - Weeks found: {weeks}")
+
         if len(weeks) < 3:
-            # Not enough distinct weeks to create train/test split
+            logging.warning(f"   - Skipping user_{i}: not enough weeks (<3)")
             continue
 
         df_u = df_u.sort_values("week_order")
@@ -424,56 +648,147 @@ def main() -> None:
         df_train = df_u[df_u["week_order"].isin(weeks_train)].copy()
         df_test = df_u[df_u["week_order"].isin(weeks_test)].copy()
 
+        logging.info(f"   - Train size: {len(df_train):,}, Test size: {len(df_test):,}")
+
         if df_train.empty or df_test.empty:
+            logging.warning(f"   - Skipping user_{i}: train or test split is empty")
             continue
 
-        # Spatial clustering per user
-        df_train, df_test = generate_user_clusters(df_train, df_test)
-        print("   - Spatial clustering completed.")
-        print(f"   - Total clusters found in train: {df_train['cluster'].nunique() - (1 if -1 in df_train['cluster'].values else 0)}")
-        print(f"   - Total clusters assigned in test: {df_test['cluster'].nunique() - (1 if -1 in df_test['cluster'].values else 0)}")
+        # ---------------------------
+        # Spatial clustering
+        # ---------------------------
+        try:
+            logging.info(f"   - Running DBSCAN clustering for user_{i}...")
 
-        # Store train subset for cluster visualization
+            vocab_output_path = os.path.join(user_model_path, "location_vocab_user.json")
+
+            # 1) Build a sampled train split ONLY for clustering (large users)
+            LARGE_USER_THRESHOLD = 50_000
+            MAX_POINTS_PER_CELL = 300
+            PRECISION = 3  # ~100–150m cell size
+
+            df_train_for_clustering = df_train
+
+            if len(df_train) > LARGE_USER_THRESHOLD:
+                logging.info(
+                    f"   - Large train split detected ({len(df_train):,} rows). "
+                    "Applying spatial stratified sampling before DBSCAN..."
+                )
+
+                tmp = df_train.copy()
+                tmp["spatial_cell"] = tmp.apply(
+                    lambda r: spatial_cell(float(r["latitude"]), float(r["longitude"]), precision=PRECISION),
+                    axis=1,
+                )
+
+                df_train_for_clustering = (
+                    tmp.groupby("spatial_cell", group_keys=False)
+                    .apply(lambda g: g.sample(
+                        n=min(len(g), MAX_POINTS_PER_CELL),
+                        random_state=42,
+                    ))
+                    .drop(columns=["spatial_cell"])
+                )
+
+                logging.info(
+                    f"   - Sampling done. Train for clustering reduced to "
+                    f"{len(df_train_for_clustering):,} rows."
+                )
+
+            # 2) Cluster sampled train -> this produces clusters for the sampled points
+            generate_user_clusters(
+                df_train_for_clustering,
+                user_uuid=str(user_id),
+                vocab_output_path=vocab_output_path,
+            )
+
+            # 3) Load centroids vocab
+            vocab_df = load_location_vocab_df(vocab_output_path)
+
+            # 4) Assign clusters to FULL train and test using centroids (quantizeLocation logic)
+            df_train = assign_clusters_by_centroids(df_train, vocab_df, eps_meters=EPS_METERS)
+            df_test  = assign_clusters_by_centroids(df_test,  vocab_df, eps_meters=EPS_METERS)
+            logging.info("   - Spatial clustering completed successfully.")
+
+            df_train["cluster_prod"] = df_train["cluster"].astype(int)
+            df_test["cluster_prod"]  = df_test["cluster"].astype(int)
+
+            df_train["hour_prod"] = df_train["hour"].astype(int)
+            df_test["hour_prod"]  = df_test["hour"].astype(int)
+
+            df_train["weekday_prod"] = df_train["weekday_prod"].astype(int)
+            df_test["weekday_prod"]  = df_test["weekday_prod"].astype(int)
+
+            df_train["input_vector_prod"] = list(zip(
+            df_train["cluster_prod"], df_train["weekday_prod"], df_train["hour_prod"]
+            ))
+            df_test["input_vector_prod"] = list(zip(
+                df_test["cluster_prod"], df_test["weekday_prod"], df_test["hour_prod"]
+            ))
+
+            num_train_clusters = df_train["cluster"].nunique() - (1 if -1 in df_train["cluster"].values else 0)
+            num_test_clusters = df_test["cluster"].nunique() - (1 if -1 in df_test["cluster"].values else 0)
+
+            logging.info(f"       Train clusters (full train): {num_train_clusters}")
+            logging.info(f"       Test clusters:              {num_test_clusters}")
+
+        except Exception as e:
+            logging.error(f"   ERROR during clustering for user_{i}: {e}")
+            continue
+
+        # Store for visualization
         df_train["user_uuid_enc"] = le_user.transform(df_train["user_uuid"])
         train_parts_for_viz.append(df_train.copy())
 
-        # Encoders: card + user + contextual one-hot
-        print("   - Applying encoders...")
+        # ---------------------------
+        # Encoding
+        # ---------------------------
+        logging.info("   - Applying encoders...")
 
-        # 1) Card encoder (per user)
-        df_train["card_enc"] = le_card_user.transform(df_train["card_written_text"])
-        df_test["card_enc"] = le_card_user.transform(df_test["card_written_text"])
+        try:
+            df_train["card_enc"] = le_card_user.transform(df_train["card_written_text"])
+            df_test["card_enc"] = le_card_user.transform(df_test["card_written_text"])
 
-        # 2) Global user encoder
-        df_train["user_uuid_enc"] = le_user.transform(df_train["user_uuid"])
-        df_test["user_uuid_enc"] = le_user.transform(df_test["user_uuid"])
+            df_train["user_uuid_enc"] = le_user.transform(df_train["user_uuid"])
+            df_test["user_uuid_enc"] = le_user.transform(df_test["user_uuid"])
 
-        # 3) One-hot encoder for contextual features
-        context_cols = ["period_day", "week_day", "cluster"]
-        ohe_ctx = OneHotEncoder(sparse_output=False, handle_unknown="ignore")
+            cat_cols = ["weekday_prod", "cluster_prod"]
+            fuzzy_cols = ["dawn", "morn", "noon", "aftn", "even", "nght"]
 
-        ohe_ctx.fit(df_train[context_cols])
-        joblib.dump(ohe_ctx, os.path.join(user_model_path, "onehot_encoder.pkl"))
-        print(f"   - OneHotEncoder trained and saved at {user_model_path}")
+            ohe_ctx = OneHotEncoder(sparse_output=False, handle_unknown="ignore")
 
-        # Transform and save user-specific train and test datasets
-        for df_part, name in [(df_train, "train"), (df_test, "test")]:
-            ctx_encoded = ohe_ctx.transform(df_part[context_cols])
-            feature_names = ohe_ctx.get_feature_names_out(context_cols)
-            df_encoded = pd.DataFrame(ctx_encoded, columns=feature_names, index=df_part.index) # type: ignore
+            logging.info("   - Training OneHotEncoder...")
+            ohe_ctx.fit(df_train[cat_cols])
+            joblib.dump(ohe_ctx, os.path.join(user_model_path, "onehot_encoder.pkl"))
+            logging.info("   - OneHotEncoder trained successfully.")
 
-            # Drop original text and categorical context columns
-            df_part = df_part.drop(columns=["card_written_text", "user_uuid"] + context_cols)
-            df_final_user = pd.concat([df_part, df_encoded], axis=1)
+            for df_part, name in [(df_train, "train"), (df_test, "test")]:
+                # 1) OHE só nas categóricas
+                ctx_cat = ohe_ctx.transform(df_part[cat_cols])
+                cat_feature_names = ohe_ctx.get_feature_names_out(cat_cols)
+                df_cat = pd.DataFrame(ctx_cat, columns=cat_feature_names, index=df_part.index)
 
-            output_path = os.path.join(user_model_path, f"{name}_processed.parquet")
-            df_final_user.to_parquet(output_path, compression="snappy")
-            print(f"   - File saved: {output_path}")
+                # 2) fuzzy entra como numérico direto (sem OHE)
+                df_fuzzy = df_part[fuzzy_cols].astype(float)
 
-            if name == "train":
-                train_parts.append(df_final_user)
-            else:
-                test_parts.append(df_final_user)
+                # 3) drop do que não vai pro modelo
+                df_part_drop = df_part.drop(columns=["card_written_text", "user_uuid"] + cat_cols + fuzzy_cols)
+
+                # 4) concat final
+                df_final_user = pd.concat([df_part_drop, df_cat, df_fuzzy], axis=1)
+
+                output_path = os.path.join(user_model_path, f"{name}_processed.parquet")
+                df_final_user.to_parquet(output_path, compression="snappy")
+                logging.info(f"       Saved {name} dataset to: {output_path}")
+
+                if name == "train":
+                    train_parts.append(df_final_user)
+                else:
+                    test_parts.append(df_final_user)
+
+        except Exception as e:
+            logging.error(f"   ERROR during encoding for user_{i}: {e}")
+            continue
 
     # 9. Concatenate all users and save global datasets
     print("\n--- Concatenating and saving final train/test datasets ---")
