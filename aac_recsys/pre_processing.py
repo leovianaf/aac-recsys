@@ -50,6 +50,10 @@ FILE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = FILE_DIR.parent
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 REPORTS_DIR = PROJECT_ROOT / "reports" / "figures" / "cluster_heatmaps"
+PROCESSED_USERS_DIR = PROCESSED_DIR / "users"
+MODELS_USERS_DIR = PROJECT_ROOT / "models"
+
+
 
 
 def parse_args() -> argparse.Namespace:
@@ -98,25 +102,28 @@ def setup_logging(log_file: Optional[Path] = None) -> logging.Logger:
     return logger
 
 
-def user_artifacts_exist(user_dir: Path) -> bool:
+def user_artifacts_exist(user_data_dir: Path, user_model_dir: Path) -> bool:
     """
     Return True if all expected per-user artifacts exist.
 
-    Artifacts:
+    Data artifacts (data/processed):
     - processed.parquet
     - label_vocab.json
     - location_vocab_user.json
+
+    Model artifacts (models):
     - label_encoder_card.pkl
     - onehot_encoder.pkl
     """
     needed = [
-        user_dir / "processed.parquet",
-        user_dir / "label_vocab.json",
-        user_dir / "location_vocab_user.json",
-        user_dir / "label_encoder_card.pkl",
-        user_dir / "onehot_encoder.pkl",
+        user_data_dir / "processed.parquet",
+        user_data_dir / "label_vocab.json",
+        user_data_dir / "location_vocab_user.json",
+        user_model_dir / "label_encoder_card.pkl",
+        user_model_dir / "onehot_encoder.pkl",
     ]
     return all(p.exists() for p in needed)
+
 
 
 def normalize_card_text(text: Any) -> str:
@@ -455,10 +462,13 @@ def main() -> None:
             continue
 
         logger.info("Processing user_%d", i)
-        user_dir = PROJECT_ROOT / "models" / f"user_{i}"
-        user_dir.mkdir(parents=True, exist_ok=True)
+        user_data_dir = PROCESSED_USERS_DIR / f"user_{i}"
+        user_model_dir = MODELS_USERS_DIR / f"user_{i}"
 
-        if not args.force and user_artifacts_exist(user_dir):
+        user_data_dir.mkdir(parents=True, exist_ok=True)
+        user_model_dir.mkdir(parents=True, exist_ok=True)
+
+        if not args.force and user_artifacts_exist(user_data_dir, user_model_dir):
             logger.info("Skipping user_%d (artifacts exist). Use --force to reprocess.", i)
             continue
 
@@ -468,11 +478,11 @@ def main() -> None:
         generate_label_vocab_json(
             df_u,
             text_col="card_written_text",
-            output_path=user_dir / "label_vocab.json",
+            output_path=user_data_dir / "label_vocab.json",
         )
 
         le_card_user = LabelEncoder().fit(df_u["card_written_text"])
-        joblib.dump(le_card_user, user_dir / "label_encoder_card.pkl")
+        joblib.dump(le_card_user, user_model_dir / "label_encoder_card.pkl")
 
         df_for_clustering = df_u
         if len(df_u) > large_user_threshold:
@@ -493,7 +503,7 @@ def main() -> None:
 
         clustered = clusterize_locations(df_for_clustering, eps_meters=EPS_METERS, min_samples=MIN_SAMPLES)
 
-        vocab_path = user_dir / "location_vocab_user.json"
+        vocab_path = user_data_dir / "location_vocab_user.json"
         save_user_location_vocab(clustered, user_tag=f"user_{i}", output_path=vocab_path)
 
         vocab_df = load_location_vocab_df(vocab_path)
@@ -502,12 +512,12 @@ def main() -> None:
         df_u["user_uuid_enc"] = le_user.transform(df_u["user_uuid"])
         df_u["card_enc"] = le_card_user.transform(df_u["card_written_text"])
 
-        cat_cols = ["week_day", "cluster"]
+        cat_cols = ["week_day"]
         fuzzy_cols = ["dawn", "morn", "noon", "aftn", "even", "nght"]
 
         ohe = OneHotEncoder(sparse_output=False, handle_unknown="ignore")
         ohe.fit(df_u[cat_cols])
-        joblib.dump(ohe, user_dir / "onehot_encoder.pkl")
+        joblib.dump(ohe, user_model_dir / "onehot_encoder.pkl")
 
         cat_data = ohe.transform(df_u[cat_cols])
         cat_names = ohe.get_feature_names_out(cat_cols)
@@ -517,13 +527,13 @@ def main() -> None:
         df_drop = df_u.drop(columns=["card_written_text", "user_uuid"] + cat_cols + fuzzy_cols)
         df_final = pd.concat([df_drop, df_cat, df_fuzzy], axis=1)
 
-        out_path = user_dir / "processed.parquet"
+        out_path = user_data_dir / "processed.parquet"
         df_final.to_parquet(out_path, compression="snappy", index=False)
 
         processed_parts.append(df_final)
         viz_parts.append(df_u[["user_uuid", "latitude", "longitude", "cluster"]].copy())
 
-        logger.info("Saved user_%d artifacts at: %s", i, user_dir)
+        logger.info("Saved user_%d data at: %s | models at: %s", i, user_data_dir, user_model_dir)
 
     if processed_parts:
         df_all = pd.concat(processed_parts, ignore_index=True)
