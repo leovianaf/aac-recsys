@@ -194,3 +194,9 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Models
+models/*
+
+#Images 
+reports/figures/*
