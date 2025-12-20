@@ -40,9 +40,9 @@ from ranking import build_artifacts, rank_topk
 
 @dataclass
 class FoldConfig:
-  train_days: int = 30
-  test_days: int = 14
-  step_days: int = 14
+  train_days: int = 60
+  test_days: int = 21
+  step_days: int = 21
   ks: tuple[int, ...] = (1, 3, 5)
   rank_k: int = 60  # ranks top-60 and after get @1/@3/@5
 
@@ -107,11 +107,11 @@ def evaluate_user_timeline(
 
   folds = generate_folds(df, ts_col=ts_col, cfg=cfg)
   if not folds:
-    logger.warning(f"[user={user_id}] Sem folds suficientes para avaliar (dados curtos demais).")
+    logger.warning(f"[user={user_id}] With insufficient folds to evaluate (data too short).")
     return pd.DataFrame()
 
   rows = []
-  logger.info(f"[user={user_id}] {len(folds)} folds para avaliação.")
+  logger.info(f"[user={user_id}] {len(folds)} folds for evaluation.")
 
   for fold_idx, (train_start, train_end, test_start, test_end) in enumerate(folds):
 
