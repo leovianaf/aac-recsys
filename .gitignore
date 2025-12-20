@@ -6,6 +6,10 @@
 /data/tasks/*
 !/data/**/.gitkeep
 
+# Models
+models/*
+!models/.gitkeep
+
 # Mac OS-specific storage files
 .DS_Store
 
@@ -194,9 +198,3 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
-
-# Models
-models/*
-
-#Images 
-reports/figures/*

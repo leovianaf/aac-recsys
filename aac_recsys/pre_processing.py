@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
 import os
 import shutil
 from pathlib import Path
@@ -39,21 +38,14 @@ from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 
 import matplotlib.pyplot as plt
 
+from config import PROJ_ROOT, PROCESSED_DATA_DIR, MODELS_DIR, FIGURES_DIR, logger
+
 
 EARTH_RADIUS_METERS = 6_373_000
 EPS_METERS = 400
 MIN_SAMPLES = 3
 
 REQUIRED_COLUMNS = ["user_uuid", "click_location", "card_written_text", "event_timestamp"]
-
-FILE_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = FILE_DIR.parent
-PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
-REPORTS_DIR = PROJECT_ROOT / "reports" / "figures" / "cluster_heatmaps"
-PROCESSED_USERS_DIR = PROCESSED_DIR / "users"
-MODELS_USERS_DIR = PROJECT_ROOT / "models"
-
-
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,43 +55,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force", action="store_true", help="Reprocess even if outputs exist")
     parser.add_argument("--no-plots", action="store_true", help="Skip plot generation")
     return parser.parse_args()
-
-
-def setup_logging(log_file: Optional[Path] = None) -> logging.Logger:
-    """
-    Configure logging to stdout and optionally to a log file.
-
-    Parameters
-    ----------
-    log_file:
-        If provided, writes logs to this file as well.
-
-    Returns
-    -------
-    logging.Logger
-        Configured logger instance.
-    """
-    logger = logging.getLogger("preprocess")
-    logger.setLevel(logging.INFO)
-
-    if logger.handlers:
-        return logger
-
-    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-
-    console = logging.StreamHandler()
-    console.setLevel(logging.INFO)
-    console.setFormatter(formatter)
-    logger.addHandler(console)
-
-    if log_file is not None:
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(log_file, mode="w", encoding="utf-8")
-        fh.setLevel(logging.INFO)
-        fh.setFormatter(formatter)
-        logger.addHandler(fh)
-
-    return logger
 
 
 def user_artifacts_exist(user_data_dir: Path, user_model_dir: Path) -> bool:
@@ -357,98 +312,104 @@ def main() -> None:
     args = parse_args()
     load_dotenv()
 
-    logger = setup_logging(PROJECT_ROOT / "preprocessing.log")
+    log_path = PROJ_ROOT / "preprocessing.log"
+    sink_id = logger.add(str(log_path), level="INFO")
     logger.info("--- Starting Preprocessing Pipeline ---")
 
     gs_url = os.getenv("GS_DATASET_URL")
     if not gs_url:
         raise RuntimeError("Environment variable GS_DATASET_URL is not set.")
 
-    logger.info("Loading dataset from: %s", gs_url)
-    df = pd.read_parquet(gs_url)
-    logger.info("Dataset loaded: %d rows", len(df))
+    filtered_parquet_path = PROCESSED_DATA_DIR / "df_filtered.parquet"
+    if filtered_parquet_path.exists():
+        logger.info("--- Loading cached filtered dataset ---")
+        df_filtered = pd.read_parquet(filtered_parquet_path)
+    else:
+        logger.info("--- Loading dataset from URL ---")
+        df = pd.read_parquet(gs_url)
+        logger.info("Dataset loaded: {} rows", len(df))
 
-    df_clean = df.dropna(subset=REQUIRED_COLUMNS).copy()
-    logger.info("After cleaning: %d rows", len(df_clean))
+        df_clean = df.dropna(subset=REQUIRED_COLUMNS).copy()
+        logger.info("After cleaning: {} rows", len(df_clean))
 
-    dt = (
-        pd.to_datetime(df_clean["event_timestamp"], unit="us", utc=True, errors="coerce")
-        .dt.tz_convert("America/Recife")
-    )
-    df_clean["week_day"] = dt.dt.day_name()
-    df_clean["hour"] = dt.dt.hour
-    df_clean["year_num"] = dt.dt.year
-    df_clean["week_num"] = dt.dt.isocalendar().week
+        dt = (
+            pd.to_datetime(df_clean["event_timestamp"], unit="us", utc=True, errors="coerce")
+            .dt.tz_convert("America/Recife")
+        )
+        df_clean["timestamp"] = dt
+        df_clean["week_day"] = dt.dt.day_name()
+        df_clean["hour"] = dt.dt.hour
+        df_clean["year_num"] = dt.dt.year
+        df_clean["week_num"] = dt.dt.isocalendar().week
 
-    df_clean["week_order"] = df_clean["year_num"].astype(str) + "-" + df_clean["week_num"].astype(str)
-    df_clean["week_order"] = pd.Categorical(
-        df_clean["week_order"],
-        categories=df_clean["week_order"].unique(),
-        ordered=True,
-    )
+        df_clean["week_order"] = df_clean["year_num"].astype(str) + "-" + df_clean["week_num"].astype(str)
+        df_clean["week_order"] = pd.Categorical(
+            df_clean["week_order"],
+            categories=df_clean["week_order"].unique(),
+            ordered=True,
+        )
 
-    fuzzy_df = df_clean["hour"].apply(compute_fuzzy_time_memberships).apply(pd.Series)
-    df_clean = pd.concat([df_clean.drop(columns=[]), fuzzy_df], axis=1)
+        fuzzy_df = df_clean["hour"].apply(compute_fuzzy_time_memberships).apply(pd.Series)
+        df_clean = pd.concat([df_clean.drop(columns=[]), fuzzy_df], axis=1)
 
-    df_filtered = df_clean.copy()
-    logger.info("Before filtering: rows=%d users=%d", len(df_filtered), df_filtered["user_uuid"].nunique())
+        df_filtered = df_clean.copy()
+        logger.info("Before filtering: rows={} users={}", len(df_filtered), df_filtered["user_uuid"].nunique())
 
-    clicks = df_filtered.groupby("user_uuid")["event_timestamp"].count()
-    df_filtered = df_filtered[df_filtered["user_uuid"].isin(clicks[clicks >= 50].index)]
-    logger.info("After filter clicks>=50: rows=%d users=%d", len(df_filtered), df_filtered["user_uuid"].nunique())
+        clicks = df_filtered.groupby("user_uuid")["event_timestamp"].count()
+        df_filtered = df_filtered[df_filtered["user_uuid"].isin(clicks[clicks >= 50].index)]
+        logger.info("After filter clicks>=50: rows={} users={}", len(df_filtered), df_filtered["user_uuid"].nunique())
 
-    locs = df_filtered.groupby("user_uuid")["click_location"].nunique()
-    df_filtered = df_filtered[df_filtered["user_uuid"].isin(locs[locs >= 10].index)]
-    logger.info("After filter locs>=10: rows=%d users=%d", len(df_filtered), df_filtered["user_uuid"].nunique())
+        locs = df_filtered.groupby("user_uuid")["click_location"].nunique()
+        df_filtered = df_filtered[df_filtered["user_uuid"].isin(locs[locs >= 10].index)]
+        logger.info("After filter locs>=10: rows={} users={}", len(df_filtered), df_filtered["user_uuid"].nunique())
 
-    hours = df_filtered.groupby("user_uuid")["hour"].nunique()
-    df_filtered = df_filtered[df_filtered["user_uuid"].isin(hours[hours >= 20].index)]
-    logger.info("After filter hours>=20: rows=%d users=%d", len(df_filtered), df_filtered["user_uuid"].nunique())
+        hours = df_filtered.groupby("user_uuid")["hour"].nunique()
+        df_filtered = df_filtered[df_filtered["user_uuid"].isin(hours[hours >= 20].index)]
+        logger.info("After filter hours>=20: rows={} users={}", len(df_filtered), df_filtered["user_uuid"].nunique())
 
-    weeks = df_filtered.groupby("user_uuid")["week_order"].nunique()
-    df_filtered = df_filtered[df_filtered["user_uuid"].isin(weeks[weeks >= 3].index)]
-    logger.info("After filter weeks>=3: rows=%d users=%d", len(df_filtered), df_filtered["user_uuid"].nunique())
+        weeks = df_filtered.groupby("user_uuid")["week_order"].nunique()
+        df_filtered = df_filtered[df_filtered["user_uuid"].isin(weeks[weeks >= 3].index)]
+        logger.info("After filter weeks>=3: rows={} users={}", len(df_filtered), df_filtered["user_uuid"].nunique())
 
-    df_filtered["card_written_text"] = df_filtered["card_written_text"].map(normalize_card_text)
+        df_filtered["card_written_text"] = df_filtered["card_written_text"].map(normalize_card_text)
 
-    coords = df_filtered["click_location"].astype(str).str.split(",", expand=True)
-    df_filtered["latitude"] = pd.to_numeric(coords[0], errors="coerce")
-    df_filtered["longitude"] = pd.to_numeric(coords[1], errors="coerce")
-    df_filtered = df_filtered.dropna(subset=["latitude", "longitude"])
+        coords = df_filtered["click_location"].astype(str).str.split(",", expand=True)
+        df_filtered["latitude"] = pd.to_numeric(coords[0], errors="coerce")
+        df_filtered["longitude"] = pd.to_numeric(coords[1], errors="coerce")
+        df_filtered = df_filtered.dropna(subset=["latitude", "longitude"])
 
-    selected_columns = [
-        "user_uuid",
-        "click_location",
-        "card_written_text",
-        "event_timestamp",
-        "week_day",
-        "hour",
-        "year_num",
-        "week_num",
-        "week_order",
-        "dawn",
-        "morn",
-        "noon",
-        "aftn",
-        "even",
-        "nght",
-        "latitude",
-        "longitude",
-    ]
-    df_filtered = df_filtered.loc[:, selected_columns].sort_values(["user_uuid", "event_timestamp"])
+        selected_columns = [
+            "user_uuid",
+            "click_location",
+            "card_written_text",
+            "event_timestamp",
+            "timestamp",
+            "week_day",
+            "hour",
+            "year_num",
+            "week_num",
+            "week_order",
+            "dawn",
+            "morn",
+            "noon",
+            "aftn",
+            "even",
+            "nght",
+            "latitude",
+            "longitude",
+        ]
+        df_filtered = df_filtered.loc[:, selected_columns].sort_values(["user_uuid", "timestamp"])
 
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    filtered_parquet_path = PROCESSED_DIR / "df_filtered.parquet"
-    df_filtered.to_parquet(filtered_parquet_path, index=False)
-    logger.info("Saved filtered dataset: %s", filtered_parquet_path)
+        df_filtered.to_parquet(filtered_parquet_path, index=False)
+        logger.info("Saved filtered dataset: {}", filtered_parquet_path)
 
     user_list = df_filtered["user_uuid"].unique()
     le_user = LabelEncoder().fit(user_list)
 
-    global_encoder_dir = PROJECT_ROOT / "models" / "global_encoders"
+    global_encoder_dir = MODELS_DIR / "global_encoders"
     global_encoder_dir.mkdir(parents=True, exist_ok=True)
     joblib.dump(le_user, global_encoder_dir / "label_encoder_user.pkl")
-    logger.info("Saved global LabelEncoder (users): %s", global_encoder_dir / "label_encoder_user.pkl")
+    logger.info("Saved global LabelEncoder (users): {}", global_encoder_dir / "label_encoder_user.pkl")
 
     processed_parts: List[pd.DataFrame] = []
     viz_parts: List[pd.DataFrame] = []
@@ -461,19 +422,19 @@ def main() -> None:
         if args.user_idx is not None and i != args.user_idx:
             continue
 
-        logger.info("Processing user_%d", i)
-        user_data_dir = PROCESSED_USERS_DIR / f"user_{i}"
-        user_model_dir = MODELS_USERS_DIR / f"user_{i}"
+        logger.info("Processing user_{}", i)
+        user_data_dir = PROCESSED_DATA_DIR / f"user_{i}"
+        user_model_dir = MODELS_DIR / f"user_{i}"
 
         user_data_dir.mkdir(parents=True, exist_ok=True)
         user_model_dir.mkdir(parents=True, exist_ok=True)
 
         if not args.force and user_artifacts_exist(user_data_dir, user_model_dir):
-            logger.info("Skipping user_%d (artifacts exist). Use --force to reprocess.", i)
+            logger.info("Skipping user_{} (artifacts exist). Use --force to reprocess.", i)
             continue
 
         df_u = df_filtered[df_filtered["user_uuid"] == user_uuid].copy()
-        df_u = df_u.sort_values("event_timestamp")
+        df_u = df_u.sort_values("timestamp")
 
         generate_label_vocab_json(
             df_u,
@@ -499,7 +460,7 @@ def main() -> None:
                 )
                 .drop(columns=["spatial_cell"], errors="ignore")
             )
-            logger.info("User_%d sampled for clustering: %d -> %d", i, len(df_u), len(df_for_clustering))
+            logger.info("User_{} sampled for clustering: {} -> {}", i, len(df_u), len(df_for_clustering))
 
         clustered = clusterize_locations(df_for_clustering, eps_meters=EPS_METERS, min_samples=MIN_SAMPLES)
 
@@ -521,7 +482,7 @@ def main() -> None:
 
         cat_data = ohe.transform(df_u[cat_cols])
         cat_names = ohe.get_feature_names_out(cat_cols)
-        df_cat = pd.DataFrame(cat_data, columns=cat_names, index=df_u.index)
+        df_cat = pd.DataFrame(np.asarray(cat_data), columns=cat_names, index=df_u.index)
 
         df_fuzzy = df_u[fuzzy_cols].astype(float)
         df_drop = df_u.drop(columns=["card_written_text", "user_uuid"] + cat_cols + fuzzy_cols)
@@ -533,25 +494,27 @@ def main() -> None:
         processed_parts.append(df_final)
         viz_parts.append(df_u[["user_uuid", "latitude", "longitude", "cluster"]].copy())
 
-        logger.info("Saved user_%d data at: %s | models at: %s", i, user_data_dir, user_model_dir)
+        logger.info("Saved user_{} data at: {} | models at: {}", i, user_data_dir, user_model_dir)
 
-    if processed_parts:
+    if processed_parts and args.user_idx is None:
         df_all = pd.concat(processed_parts, ignore_index=True)
-        out_all_path = PROCESSED_DIR / "all_users_processed.parquet"
+        out_all_path = PROCESSED_DATA_DIR / "all_users_processed.parquet"
         df_all.to_parquet(out_all_path, index=False, compression="snappy")
-        logger.info("Saved global dataset: %s (rows=%d)", out_all_path, len(df_all))
+        logger.info("Saved global dataset: {} (rows={})", out_all_path, len(df_all))
 
-    if viz_parts:
+    if viz_parts and args.user_idx is None:
         df_viz = pd.concat(viz_parts, ignore_index=True)
-        viz_path = PROCESSED_DIR / "data_for_visualization.parquet"
+        viz_path = PROCESSED_DATA_DIR / "data_for_visualization.parquet"
         df_viz.to_parquet(viz_path, index=False, compression="snappy")
-        logger.info("Saved viz parquet: %s (rows=%d)", viz_path, len(df_viz))
+        logger.info("Saved viz parquet: {} (rows={})", viz_path, len(df_viz))
 
         if not args.no_plots:
-            generate_cluster_heatmaps(viz_path, REPORTS_DIR, clear_output_dir=True)
-            logger.info("Saved plots to: %s", REPORTS_DIR)
+            plots_dir = FIGURES_DIR / "cluster_heatmaps"
+            generate_cluster_heatmaps(viz_path, plots_dir, clear_output_dir=True)
+            logger.info("Saved plots to: {}", plots_dir)
 
     logger.info("--- Done ---")
+    logger.remove(sink_id)
 
 
 if __name__ == "__main__":
