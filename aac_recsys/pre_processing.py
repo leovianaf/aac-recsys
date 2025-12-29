@@ -24,9 +24,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import joblib
 import numpy as np
@@ -36,9 +35,8 @@ from sklearn.cluster import DBSCAN
 from sklearn.neighbors import BallTree
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 
-import matplotlib.pyplot as plt
-
-from config import PROJ_ROOT, PROCESSED_DATA_DIR, MODELS_DIR, FIGURES_DIR, logger
+from aac_recsys.config import PROJ_ROOT, PROCESSED_DATA_DIR, MODELS_DIR, logger
+from aac_recsys.plots import run_plots
 
 
 EARTH_RADIUS_METERS = 6_373_000
@@ -46,6 +44,7 @@ EPS_METERS = 400
 MIN_SAMPLES = 3
 
 REQUIRED_COLUMNS = ["user_uuid", "click_location", "card_written_text", "event_timestamp"]
+PERIOD_KEYS = ["dawn", "morn", "noon", "aftn", "even", "nght"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--user-idx", type=int, default=None, help="Process only user_{idx}")
     parser.add_argument("--force", action="store_true", help="Reprocess even if outputs exist")
-    parser.add_argument("--no-plots", action="store_true", help="Skip plot generation")
+    parser.add_argument("--plots", action="store_true", help="Generate plots")
     return parser.parse_args()
 
 
@@ -242,74 +241,8 @@ def assign_clusters_by_centroids(
     return out
 
 
-def plot_user_hexbin(df_u: pd.DataFrame, outpath: Path, user_idx: int, gridsize: int = 80) -> None:
-    """Save a density heatmap (hexbin) for a user."""
-    lat = df_u["latitude"].to_numpy()
-    lon = df_u["longitude"].to_numpy()
-
-    plt.figure()
-    plt.hexbin(lon, lat, gridsize=gridsize, bins="log")
-    plt.colorbar(label="log10(contagem)")
-    plt.xlabel("Longitude")
-    plt.ylabel("Latitude")
-    plt.title(f"Heatmap (hexbin) — user_{user_idx}")
-    plt.tight_layout()
-    plt.savefig(outpath, dpi=200)
-    plt.close()
-
-
-def plot_user_clusters_scatter(
-    df_u: pd.DataFrame,
-    outpath: Path,
-    user_idx: int,
-    max_points: int = 120_000,
-) -> None:
-    """Save a scatter plot colored by cluster id for a user."""
-    if len(df_u) > max_points:
-        df_u = df_u.sample(n=max_points, random_state=42)
-
-    lat = df_u["latitude"].to_numpy()
-    lon = df_u["longitude"].to_numpy()
-    cluster = df_u["cluster"].to_numpy()
-
-    plt.figure()
-    plt.scatter(lon, lat, c=cluster, s=4, alpha=0.4)
-    plt.colorbar(label="cluster id (-1 = noise)")
-    plt.xlabel("Longitude")
-    plt.ylabel("Latitude")
-    plt.title(f"Clusters — user_{user_idx}")
-    plt.tight_layout()
-    plt.savefig(outpath, dpi=200)
-    plt.close()
-
-
-def generate_cluster_heatmaps(
-    viz_parquet_path: Path,
-    output_dir: Path,
-    *,
-    clear_output_dir: bool = True,
-) -> None:
-    """Generate per-user cluster plots from visualization parquet."""
-    if clear_output_dir and output_dir.exists():
-        shutil.rmtree(output_dir)
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    df = pd.read_parquet(viz_parquet_path)
-
-    required = {"user_uuid", "latitude", "longitude", "cluster"}
-    missing = required - set(df.columns)
-    if missing:
-        raise KeyError(f"Missing columns in viz parquet: {missing}")
-
-    for idx, (_, df_u) in enumerate(df.groupby("user_uuid", sort=True)):
-        df_u = df_u.dropna(subset=["latitude", "longitude", "cluster"]).copy()
-        plot_user_hexbin(df_u, output_dir / f"user_{idx}_hexbin.png", user_idx=idx)
-        plot_user_clusters_scatter(df_u, output_dir / f"user_{idx}_clusters.png", user_idx=idx)
-
-
-def main() -> None:
+def run_preprocess(*, user_idx: int | None = None, force: bool = False, plots: bool = False) -> None:
     """Run preprocessing pipeline and optionally generate plots."""
-    args = parse_args()
     load_dotenv()
 
     log_path = PROJ_ROOT / "preprocessing.log"
@@ -360,12 +293,12 @@ def main() -> None:
         logger.info("After filter clicks>=50: rows={} users={}", len(df_filtered), df_filtered["user_uuid"].nunique())
 
         locs = df_filtered.groupby("user_uuid")["click_location"].nunique()
-        df_filtered = df_filtered[df_filtered["user_uuid"].isin(locs[locs >= 10].index)]
-        logger.info("After filter locs>=10: rows={} users={}", len(df_filtered), df_filtered["user_uuid"].nunique())
+        df_filtered = df_filtered[df_filtered["user_uuid"].isin(locs[locs >= 3].index)]
+        logger.info("After filter locs>=3: rows={} users={}", len(df_filtered), df_filtered["user_uuid"].nunique())
 
         hours = df_filtered.groupby("user_uuid")["hour"].nunique()
-        df_filtered = df_filtered[df_filtered["user_uuid"].isin(hours[hours >= 20].index)]
-        logger.info("After filter hours>=20: rows={} users={}", len(df_filtered), df_filtered["user_uuid"].nunique())
+        df_filtered = df_filtered[df_filtered["user_uuid"].isin(hours[hours >= 18].index)]
+        logger.info("After filter hours>=18: rows={} users={}", len(df_filtered), df_filtered["user_uuid"].nunique())
 
         weeks = df_filtered.groupby("user_uuid")["week_order"].nunique()
         df_filtered = df_filtered[df_filtered["user_uuid"].isin(weeks[weeks >= 3].index)]
@@ -401,7 +334,7 @@ def main() -> None:
         df_filtered = df_filtered.loc[:, selected_columns].sort_values(["user_uuid", "timestamp"])
 
         df_filtered.to_parquet(filtered_parquet_path, index=False)
-        logger.info("Saved filtered dataset: {}", filtered_parquet_path)
+        logger.success("Saved filtered dataset: {}", filtered_parquet_path)
 
     user_list = df_filtered["user_uuid"].unique()
     le_user = LabelEncoder().fit(user_list)
@@ -409,7 +342,7 @@ def main() -> None:
     global_encoder_dir = MODELS_DIR / "global_encoders"
     global_encoder_dir.mkdir(parents=True, exist_ok=True)
     joblib.dump(le_user, global_encoder_dir / "label_encoder_user.pkl")
-    logger.info("Saved global LabelEncoder (users): {}", global_encoder_dir / "label_encoder_user.pkl")
+    logger.success("Saved global LabelEncoder (users): {}", global_encoder_dir / "label_encoder_user.pkl")
 
     processed_parts: List[pd.DataFrame] = []
     viz_parts: List[pd.DataFrame] = []
@@ -419,7 +352,7 @@ def main() -> None:
     precision = 3
 
     for i, user_uuid in enumerate(user_list):
-        if args.user_idx is not None and i != args.user_idx:
+        if user_idx is not None and i != user_idx:
             continue
 
         logger.info("Processing user_{}", i)
@@ -429,7 +362,7 @@ def main() -> None:
         user_data_dir.mkdir(parents=True, exist_ok=True)
         user_model_dir.mkdir(parents=True, exist_ok=True)
 
-        if not args.force and user_artifacts_exist(user_data_dir, user_model_dir):
+        if not force and user_artifacts_exist(user_data_dir, user_model_dir):
             logger.info("Skipping user_{} (artifacts exist). Use --force to reprocess.", i)
             continue
 
@@ -496,26 +429,38 @@ def main() -> None:
 
         logger.info("Saved user_{} data at: {} | models at: {}", i, user_data_dir, user_model_dir)
 
-    if processed_parts and args.user_idx is None:
+    if processed_parts and user_idx is None:
         df_all = pd.concat(processed_parts, ignore_index=True)
         out_all_path = PROCESSED_DATA_DIR / "all_users_processed.parquet"
         df_all.to_parquet(out_all_path, index=False, compression="snappy")
-        logger.info("Saved global dataset: {} (rows={})", out_all_path, len(df_all))
+        logger.success("Saved global dataset: {} (rows={})", out_all_path, len(df_all))
 
-    if viz_parts and args.user_idx is None:
+        baseline_cols = ["user_uuid_enc", "timestamp", "card_enc"]
+        df_baseline = df_all.loc[:, baseline_cols].copy()
+
+        baseline_path = PROCESSED_DATA_DIR / "df_baseline.parquet"
+
+        if baseline_path.exists() and not force:
+            logger.info("df_baseline.parquet exists; skipping (use --force to overwrite).")
+        else:
+            df_baseline.to_parquet(baseline_path, index=False, compression="snappy")
+            logger.success("Saved baseline dataset: {} (rows={})", baseline_path, len(df_baseline))
+
+    if viz_parts and user_idx is None:
         df_viz = pd.concat(viz_parts, ignore_index=True)
         viz_path = PROCESSED_DATA_DIR / "data_for_visualization.parquet"
         df_viz.to_parquet(viz_path, index=False, compression="snappy")
-        logger.info("Saved viz parquet: {} (rows={})", viz_path, len(df_viz))
+        logger.success("Saved viz parquet: {} (rows={})", viz_path, len(df_viz))
 
-        if not args.no_plots:
-            plots_dir = FIGURES_DIR / "cluster_heatmaps"
-            generate_cluster_heatmaps(viz_path, plots_dir, clear_output_dir=True)
-            logger.info("Saved plots to: {}", plots_dir)
+        if plots:
+            run_plots(viz_path)
 
-    logger.info("--- Done ---")
+    logger.success("--- Done ---")
     logger.remove(sink_id)
 
+def main() -> None:
+    args = parse_args()
+    run_preprocess(user_idx=args.user_idx, force=args.force, plots=args.plots)
 
 if __name__ == "__main__":
     main()
