@@ -104,7 +104,7 @@ python -m aac_recsys.pre_processing
 | `--user-idx`       | Process only a specific user (user_{idx})           |
 | `--force`          | Force re-processing even if artifacts already exist |
 | `--plots`          | Generate plots at the end of pre-processing         |
-| `--plots-per-user` | Generate plots for all users                        |
+| `--plots-per-user` | Generate individual plots per user                  |
 
 **Examples**
 
@@ -154,7 +154,7 @@ python -m aac_recsys.plots
 | :------------------- | :-------------------------------------------------------- |
 | `--clear`            | Clear the entire output directory before generating plots |
 | `--per-user`         | Generate individual plots per user                        |
-| `--clear-per-user` | Clear only the per-user plots subdirectory                |
+| `--clear-per-user`   | Clear only the per-user plots subdirectory                |
 | `--top-n`            | Number of most active users used in global plots          |
 | `--viz-path`         | Path to data_for_visualization.parquet                    |
 
@@ -200,18 +200,18 @@ python -m aac_recsys.main --model baseline
 
 **Main arguments:**
 
-| Argument             | Description                                      |
-| :------------------- | :----------------------------------------------- |
-| `--preprocess`       | Run pre-processing before evaluation             |
-| `--preprocess-force` | Force pre-processing                             |
-| `--preprocess-plots` | Generate plots during pre-processing             |
-| `--model`            | Number of most active users used in global plots |
-| `--min-train-days`   | Minimum training window size                     |
-| `--max-train-days`   | Maximum training window size                     |
-| `--test-days`        | Test window size                                 |
-| `--step-days`        | Step size between windows                        |
-| `--rank-k`           | Maximum number of ranked items                   |
-| `--ks`               | K values for metrics (e.g., 1,3,5)               |
+| Argument             | Description                                             |
+| :------------------- | :------------------------------------------------------ |
+| `--preprocess`       | Run pre-processing before evaluation                    |
+| `--preprocess-force` | Force pre-processing                                    |
+| `--preprocess-plots` | Generate plots during pre-processing                    |
+| `--model`            | Model chosen (e.g., baseline, two-tower, random-forest) |
+| `--min-train-days`   | Minimum training window size                            |
+| `--max-train-days`   | Maximum training window size                            |
+| `--test-days`        | Test window size                                        |
+| `--step-days`        | Step size between windows                               |
+| `--rank-k`           | Maximum number of ranked items                          |
+| `--ks`               | K values for metrics (e.g., 1,3,5)                      |
 
 **Full example (integrated pipeline)**
 
