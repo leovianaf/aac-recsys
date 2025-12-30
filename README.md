@@ -99,11 +99,12 @@ python -m aac_recsys.pre_processing
 
 **Available arguments:**
 
-| Argument     | Description                                         |
-| :----------- | :-------------------------------------------------- |
-| `--user-idx` | Process only a specific user (user_{idx})           |
-| `--force`    | Force re-processing even if artifacts already exist |
-| `--plots`    | Generate plots at the end of pre-processing         |
+| Argument           | Description                                         |
+| :----------------- | :-------------------------------------------------- |
+| `--user-idx`       | Process only a specific user (user_{idx})           |
+| `--force`          | Force re-processing even if artifacts already exist |
+| `--plots`          | Generate plots at the end of pre-processing         |
+| `--plots-per-user` | Generate plots for all users                        |
 
 **Examples**
 
@@ -217,7 +218,7 @@ python -m aac_recsys.main --model baseline
 ```bash
 python -m aac_recsys.main \
   --preprocess \
-  --technique baseline \
+  --model baseline \
   --min-train-days 60 \
   --max-train-days 180 \
   --test-days 7 \
@@ -228,12 +229,12 @@ python -m aac_recsys.main \
 
 **Main arguments:**
 
-| Path / File                                     | Description                  |
-| :---------------------------------------------- | :--------------------------- |
-| `data/processed/df_filtered.parquet`            | Base filtered dataset        |
-| `data/processed/df_baseline.parquet`            | Minimal dataset for baseline |
-| `data/processed/user_{i}/processed.parquet`     | Per-user processed data      |
-| `data/processed/data_for_visualization.parquet` | Visualization dataset        |
-| `reports/predict_metrics_<model>.csv`           | Per-user, per-fold metrics   |
-| `reports/predict_window_summary_<model>.csv`    | Metrics aggregated by window |
-| `reports/figures/cluster_heatmaps/`             | Spatial visualizations       |
+| Path / File                                     | Description                                         |
+| :---------------------------------------------- | :-------------------------------------------------- |
+| `data/processed/df_filtered.parquet`            | Base filtered dataset                               |
+| `data/processed/df_baseline.parquet`            | Minimal dataset for baseline                        |
+| `data/processed/user_{i}/processed.parquet`     | Per-user processed data                             |
+| `data/processed/data_for_visualization.parquet` | Visualization dataset                               |
+| `reports/predict_metrics_<model>.csv`           | Per-user, per-fold metrics                          |
+| `reports/predict_user_summary_<model>.csv`      | Per-user aggregation across folds                   |
+| `reports/figures/cluster_heatmaps/`             | Spatial visualizations (global + optional per-user) |
