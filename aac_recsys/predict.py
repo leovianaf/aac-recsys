@@ -39,7 +39,7 @@ import json
 import pandas as pd
 
 from aac_recsys.config import PROCESSED_DATA_DIR, REPORTS_DIR, logger
-from aac_recsys.metrics import calculate_metrics
+from aac_recsys.metrics import calculate_metrics, summarize_per_user, summarize_overall
 from aac_recsys.models.ranker_base import Ranker
 
 
@@ -93,37 +93,6 @@ def load_user_timelines(processed_dir: Path) -> Dict[str, Path]:
     user_id = p.parent.name.replace("user_", "")
     out[user_id] = p
   return out
-
-
-# def _append_user_metrics_csv(*, csv_path: Path, new_df: pd.DataFrame) -> None:
-#   """
-#   Append-safe write:
-#   - If csv exists, read it and append new_df
-#   - Deduplicate rows by a stable key to avoid doubling when re-running
-#   """
-#   if new_df.empty:
-#     return
-
-#   # Ensure params is JSON string for diffing / storage
-#   if "params" in new_df.columns and isinstance(new_df["params"].iloc[0], dict):
-#     new_df = new_df.copy()
-#     new_df["params"] = new_df["params"].apply(lambda d: json.dumps(d, ensure_ascii=False, sort_keys=True))
-
-#   if csv_path.exists():
-#     old_df = pd.read_csv(csv_path)
-
-#     combined = pd.concat([old_df, new_df], ignore_index=True)
-
-#     # Dedup key: identifies a fold evaluation uniquely for a user+model+window
-#     dedup_cols = ["user_id", "model", "fold", "train_start", "train_end", "test_start", "test_end"]
-#     existing = [c for c in dedup_cols if c in combined.columns]
-#     if existing:
-#       combined = combined.drop_duplicates(subset=existing, keep="last")
-#   else:
-#     combined = new_df
-
-#   csv_path.parent.mkdir(parents=True, exist_ok=True)
-#   combined.to_csv(csv_path, index=False)
 
 
 def evaluate_user_timeline(
@@ -211,8 +180,9 @@ def evaluate_user_timeline(
     logger.info(
       f"[user={user_id} fold={fold_idx}] "
       f"acc@1={metrics['accuracy_top1']:.4f} "
-      f"f1_macro@1={metrics['f1_macro_top1']:.4f} "
+      f"f1@1={metrics['f1_macro_top1']:.4f} "
       + ", ".join(f"R@{k}={metrics[f'recall@{k}']:.4f}" for k in fold_cfg.ks)
+      + ", ".join(f"MRR@{k}={metrics[f'mrr@{k}']:.4f}" for k in fold_cfg.ks)
     )
 
   metrics_df = pd.DataFrame(rows)
@@ -221,16 +191,6 @@ def evaluate_user_timeline(
     metrics_df["params"] = metrics_df["params"].apply(lambda d: json.dumps(d, ensure_ascii=False, sort_keys=True))
 
   return metrics_df
-
-
-def _weighted_mean(x: pd.Series, w: pd.Series) -> float:
-  x = pd.to_numeric(x, errors="coerce")
-  w = pd.to_numeric(w, errors="coerce").fillna(0.0)
-  s = float(w.sum())
-  if s <= 0:
-    return float("nan")
-
-  return float((x * w).sum() / s)
 
 
 def run_predict(
@@ -285,42 +245,10 @@ def run_predict(
     + [f"mrr@{k}" for k in fold_cfg.ks]
   )
 
-  final_df = final_df.copy()
-  final_df["test_start"] = pd.to_datetime(final_df["test_start"], errors="coerce")
-  final_df["test_end"] = pd.to_datetime(final_df["test_end"], errors="coerce")
-  final_df["n_test"] = pd.to_numeric(final_df["n_test"], errors="coerce").fillna(0).astype(int)
+  user_summary_df = summarize_per_user(final_df, metric_cols=metric_cols)
 
-  group_cols = ["model", "test_start", "test_end"]
+  out_user_csv = REPORTS_DIR / f"predict_user_summary_{model_name}.csv"
+  user_summary_df.to_csv(out_user_csv, index=False)
 
-  rows = []
-  for (model, test_start, test_end), g in final_df.groupby(group_cols, dropna=False):
-    w = g["n_test"]
-
-    row = {
-      "model": model,
-      "test_start": test_start,
-      "test_end": test_end,
-      "users_in_window": int(g["user_id"].nunique()),
-      "total_n_test": int(w.sum()),
-      "total_n_train": int(pd.to_numeric(g["n_train"], errors="coerce").fillna(0).sum()),
-    }
-
-    # mean metrics weighted by n_test
-    for m in metric_cols:
-      row[m] = _weighted_mean(g[m], w)
-
-    rows.append(row)
-
-  window_summary_df = (
-    pd.DataFrame(rows)
-    .sort_values(["model", "test_start", "test_end"])
-    .reset_index(drop=True)
-  )
-
-  out_window_csv = REPORTS_DIR / f"predict_window_summary_{model_name}.csv"
-  window_summary_df.to_csv(out_window_csv, index=False)
-  logger.success(f"Window summary saved to: {out_window_csv}")
-
-  summary_cols = ["accuracy_top1", "f1_macro_top1"] + [f"recall@{k}" for k in fold_cfg.ks] + [f"mrr@{k}" for k in fold_cfg.ks]
-  summary = final_df.groupby("user_id")[summary_cols].mean().reset_index()
-  logger.success("Summary (average per user):\n" + summary.to_string(index=False))
+  overall = summarize_overall(user_summary_df, metric_cols=metric_cols)
+  logger.success("Overall: " + json.dumps(overall, ensure_ascii=False, indent=2))

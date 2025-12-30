@@ -53,6 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--user-idx", type=int, default=None, help="Process only user_{idx}")
     parser.add_argument("--force", action="store_true", help="Reprocess even if outputs exist")
     parser.add_argument("--plots", action="store_true", help="Generate plots")
+    parser.add_argument("--plots-per-user", action="store_true", help="Generate plots per user")
     return parser.parse_args()
 
 
@@ -241,7 +242,7 @@ def assign_clusters_by_centroids(
     return out
 
 
-def run_preprocess(*, user_idx: int | None = None, force: bool = False, plots: bool = False) -> None:
+def run_preprocess(*, user_idx: int | None = None, force: bool = False, plots: bool = False, plots_per_user: bool = False) -> None:
     """Run preprocessing pipeline and optionally generate plots."""
     load_dotenv()
 
@@ -452,15 +453,16 @@ def run_preprocess(*, user_idx: int | None = None, force: bool = False, plots: b
         df_viz.to_parquet(viz_path, index=False, compression="snappy")
         logger.success("Saved viz parquet: {} (rows={})", viz_path, len(df_viz))
 
-        if plots:
-            run_plots(viz_path)
+        gen_plots = plots or plots_per_user
+        if gen_plots:
+            run_plots(viz_path, clear=True, per_user=plots_per_user, clear_per_user=plots_per_user, top_n=15)
 
     logger.success("--- Done ---")
     logger.remove(sink_id)
 
 def main() -> None:
     args = parse_args()
-    run_preprocess(user_idx=args.user_idx, force=args.force, plots=args.plots)
+    run_preprocess(user_idx=args.user_idx, force=args.force, plots=args.plots, plots_per_user=args.plots_per_user)
 
 if __name__ == "__main__":
     main()
