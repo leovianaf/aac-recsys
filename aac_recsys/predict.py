@@ -41,6 +41,7 @@ import pandas as pd
 from aac_recsys.config import PROCESSED_DATA_DIR, REPORTS_DIR, logger
 from aac_recsys.metrics import calculate_metrics, summarize_per_user, summarize_overall
 from aac_recsys.models.ranker_base import Ranker
+from aac_recsys.plots import run_output_plots
 
 
 @dataclass
@@ -198,6 +199,7 @@ def run_predict(
   fold_cfg: FoldConfig,
   ranker_factory: Callable[[], Ranker],
   processed_dir: Path = PROCESSED_DATA_DIR,
+  plots: bool = False,
 ) -> None:
   model_name = ranker_factory().name
 
@@ -251,4 +253,7 @@ def run_predict(
   user_summary_df.to_csv(out_user_csv, index=False)
 
   overall = summarize_overall(user_summary_df, metric_cols=metric_cols)
+
+  if plots:
+    run_output_plots()
   logger.success("Overall: " + json.dumps(overall, ensure_ascii=False, indent=2))
