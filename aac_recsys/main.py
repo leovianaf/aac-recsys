@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--step-days", type=int, default=7)
     p.add_argument("--rank-k", type=int, default=60)
     p.add_argument("--ks", type=str, default="1,3,5")
+    p.add_argument("--predict-plots", action="store_true", help="Gerar plots a partir de data_for_visualization.parquet")
 
     # baseline params
     p.add_argument("--half-life-days", type=int, default=30)
@@ -88,7 +89,7 @@ def main() -> None:
     )
 
     ranker_factory = make_ranker_factory(args)
-    run_predict(fold_cfg=fold_cfg, ranker_factory=ranker_factory)
+    run_predict(fold_cfg=fold_cfg, ranker_factory=ranker_factory, plots=args.predict_plots)
 
 
 if __name__ == "__main__":

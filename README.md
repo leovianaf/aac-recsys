@@ -206,12 +206,14 @@ python -m aac_recsys.main --model baseline
 | `--preprocess-force` | Force pre-processing                                    |
 | `--preprocess-plots` | Generate plots during pre-processing                    |
 | `--model`            | Model chosen (e.g., baseline, two-tower, random-forest) |
+| `--predict-plots`    | Generate evaluation plots from prediction results       |
 | `--min-train-days`   | Minimum training window size                            |
 | `--max-train-days`   | Maximum training window size                            |
 | `--test-days`        | Test window size                                        |
 | `--step-days`        | Step size between windows                               |
 | `--rank-k`           | Maximum number of ranked items                          |
 | `--ks`               | K values for metrics (e.g., 1,3,5)                      |
+| `--half-life-days`   | Half-life (in days) for exponential decay in ranker     |
 
 **Full example (integrated pipeline)**
 
