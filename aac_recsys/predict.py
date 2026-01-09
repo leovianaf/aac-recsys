@@ -145,7 +145,11 @@ def evaluate_user_timeline(
       ts = row[ts_col].to_pydatetime()
       true_label = int(row[label_col])
 
-      preds = ranker.rank(now_ts=ts, k=fold_cfg.rank_k)
+      # Use per-row ranking if available in the ranker
+      if hasattr(ranker, "rank_row"):
+        preds = ranker.rank_row(row, k=fold_cfg.rank_k)
+      else:
+        preds = ranker.rank(now_ts=ts, k=fold_cfg.rank_k)
 
       y_true.append(true_label)
       y_pred_topk.append(preds[: fold_cfg.rank_k])

@@ -33,7 +33,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from sklearn.cluster import DBSCAN
 from sklearn.neighbors import BallTree
-from sklearn.preprocessing import LabelEncoder, OneHotEncoder
+from sklearn.preprocessing import LabelEncoder
 
 from aac_recsys.config import PROJ_ROOT, PROCESSED_DATA_DIR, MODELS_DIR, logger
 from aac_recsys.plots import run_plots
@@ -46,10 +46,24 @@ MIN_SAMPLES = 3
 REQUIRED_COLUMNS = ["user_uuid", "click_location", "card_written_text", "event_timestamp"]
 PERIOD_KEYS = ["dawn", "morn", "noon", "aftn", "even", "nght"]
 
+BASELINE_COLUMNS = ["timestamp", "event_timestamp", "card_enc"]
+RF_COLUMNS = [
+    "timestamp",
+    "event_timestamp",
+    "card_enc",
+    "hour",
+    "week_num",
+    "week_day",
+    "latitude",
+    "longitude",
+    "cluster",
+    "dawn", "morn", "noon", "aftn", "even", "nght",
+]
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, default="baseline", help="Model type to preprocess for")
     parser.add_argument("--user-idx", type=int, default=None, help="Process only user_{idx}")
     parser.add_argument("--force", action="store_true", help="Reprocess even if outputs exist")
     parser.add_argument("--plots", action="store_true", help="Generate plots")
@@ -57,26 +71,33 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def user_artifacts_exist(user_data_dir: Path, user_model_dir: Path) -> bool:
+def user_artifacts_exist(user_data_dir: Path, user_model_dir: Path, model: str) -> bool:
     """
     Return True if all expected per-user artifacts exist.
 
     Data artifacts (data/processed):
-    - processed.parquet
+    - {model}_processed.parquet
     - label_vocab.json
     - location_vocab_user.json
 
     Model artifacts (models):
     - label_encoder_card.pkl
-    - onehot_encoder.pkl
     """
-    needed = [
-        user_data_dir / "processed.parquet",
+    base = [
         user_data_dir / "label_vocab.json",
         user_data_dir / "location_vocab_user.json",
         user_model_dir / "label_encoder_card.pkl",
-        user_model_dir / "onehot_encoder.pkl",
     ]
+
+    if model == "baseline":
+        needed = base + [user_data_dir / "baseline_processed.parquet"]
+    elif model == "random_forest":
+        needed = base + [user_data_dir / "random_forest_processed.parquet"]
+    elif model == "two_tower":
+        needed = base + [user_data_dir / "two_tower_processed.parquet"]
+    else:
+        needed = base
+
     return all(p.exists() for p in needed)
 
 
@@ -242,13 +263,14 @@ def assign_clusters_by_centroids(
     return out
 
 
-def run_preprocess(*, user_idx: int | None = None, force: bool = False, plots: bool = False, plots_per_user: bool = False) -> None:
+def run_preprocess(*, model: str, user_idx: int | None = None, force: bool = False, plots: bool = False, plots_per_user: bool = False) -> None:
     """Run preprocessing pipeline and optionally generate plots."""
     load_dotenv()
 
     log_path = PROJ_ROOT / "preprocessing.log"
     sink_id = logger.add(str(log_path), level="INFO")
     logger.info("--- Starting Preprocessing Pipeline ---")
+    logger.info("--- Model: {} ---", model)
 
     gs_url = os.getenv("GS_DATASET_URL")
     if not gs_url:
@@ -345,7 +367,6 @@ def run_preprocess(*, user_idx: int | None = None, force: bool = False, plots: b
     joblib.dump(le_user, global_encoder_dir / "label_encoder_user.pkl")
     logger.success("Saved global LabelEncoder (users): {}", global_encoder_dir / "label_encoder_user.pkl")
 
-    processed_parts: List[pd.DataFrame] = []
     viz_parts: List[pd.DataFrame] = []
 
     large_user_threshold = 50_000
@@ -363,7 +384,7 @@ def run_preprocess(*, user_idx: int | None = None, force: bool = False, plots: b
         user_data_dir.mkdir(parents=True, exist_ok=True)
         user_model_dir.mkdir(parents=True, exist_ok=True)
 
-        if not force and user_artifacts_exist(user_data_dir, user_model_dir):
+        if not force and user_artifacts_exist(user_data_dir, user_model_dir, model):
             logger.info("Skipping user_{} (artifacts exist). Use --force to reprocess.", i)
             continue
 
@@ -404,48 +425,38 @@ def run_preprocess(*, user_idx: int | None = None, force: bool = False, plots: b
         vocab_df = load_location_vocab_df(vocab_path)
         df_u = assign_clusters_by_centroids(df_u, vocab_df, eps_meters=EPS_METERS)
 
-        df_u["user_uuid_enc"] = le_user.transform(df_u["user_uuid"])
         df_u["card_enc"] = le_card_user.transform(df_u["card_written_text"])
 
-        cat_cols = ["week_day"]
-        fuzzy_cols = ["dawn", "morn", "noon", "aftn", "even", "nght"]
+        if model == "baseline":
+            df_base = df_u.loc[:, BASELINE_COLUMNS].copy()
 
-        ohe = OneHotEncoder(sparse_output=False, handle_unknown="ignore")
-        ohe.fit(df_u[cat_cols])
-        joblib.dump(ohe, user_model_dir / "onehot_encoder.pkl")
+            base_out_path = user_data_dir / "baseline_processed.parquet"
+            df_base.to_parquet(base_out_path, compression="snappy", index=False)
+            logger.success("Saved Baseline dataset for user_{} at: {}", i, base_out_path)
 
-        cat_data = ohe.transform(df_u[cat_cols])
-        cat_names = ohe.get_feature_names_out(cat_cols)
-        df_cat = pd.DataFrame(np.asarray(cat_data), columns=cat_names, index=df_u.index)
+        if model == "random_forest":
+            rf_cols = [c for c in RF_COLUMNS if c in df_u.columns]
+            missing = [c for c in RF_COLUMNS if c not in df_u.columns]
+            if missing:
+                logger.warning("User_{} RF missing cols (will be skipped): {}", i, missing)
 
-        df_fuzzy = df_u[fuzzy_cols].astype(float)
-        df_drop = df_u.drop(columns=["card_written_text", "user_uuid"] + cat_cols + fuzzy_cols)
-        df_final = pd.concat([df_drop, df_cat, df_fuzzy], axis=1)
+            df_rf = df_u.loc[:, rf_cols].copy()
 
-        out_path = user_data_dir / "processed.parquet"
-        df_final.to_parquet(out_path, compression="snappy", index=False)
+            df_rf["card_enc"] = df_rf["card_enc"].astype(int)
+            df_rf["cluster"] = pd.to_numeric(df_rf["cluster"], errors="coerce").fillna(-1).astype(int)
+            df_rf["hour"] = df_rf["hour"].astype(int)
 
-        processed_parts.append(df_final)
+            rf_out_path = user_data_dir / "random_forest_processed.parquet"
+            df_rf.to_parquet(rf_out_path, compression="snappy", index=False)
+            logger.success("Saved RF dataset for user_{} at: {}", i, rf_out_path)
+
+        if model == "two_tower":
+            # Placeholder for future Two-Tower preprocessing
+            pass
+
         viz_parts.append(df_u[["user_uuid", "latitude", "longitude", "cluster"]].copy())
 
-        logger.info("Saved user_{} data at: {} | models at: {}", i, user_data_dir, user_model_dir)
-
-    if processed_parts and user_idx is None:
-        df_all = pd.concat(processed_parts, ignore_index=True)
-        out_all_path = PROCESSED_DATA_DIR / "all_users_processed.parquet"
-        df_all.to_parquet(out_all_path, index=False, compression="snappy")
-        logger.success("Saved global dataset: {} (rows={})", out_all_path, len(df_all))
-
-        baseline_cols = ["user_uuid_enc", "timestamp", "card_enc"]
-        df_baseline = df_all.loc[:, baseline_cols].copy()
-
-        baseline_path = PROCESSED_DATA_DIR / "df_baseline.parquet"
-
-        if baseline_path.exists() and not force:
-            logger.info("df_baseline.parquet exists; skipping (use --force to overwrite).")
-        else:
-            df_baseline.to_parquet(baseline_path, index=False, compression="snappy")
-            logger.success("Saved baseline dataset: {} (rows={})", baseline_path, len(df_baseline))
+        logger.success("Saved user_{} data at: {} | models at: {}", i, user_data_dir, user_model_dir)
 
     if viz_parts and user_idx is None:
         df_viz = pd.concat(viz_parts, ignore_index=True)
@@ -462,7 +473,7 @@ def run_preprocess(*, user_idx: int | None = None, force: bool = False, plots: b
 
 def main() -> None:
     args = parse_args()
-    run_preprocess(user_idx=args.user_idx, force=args.force, plots=args.plots, plots_per_user=args.plots_per_user)
+    run_preprocess(model=args.model, user_idx=args.user_idx, force=args.force, plots=args.plots, plots_per_user=args.plots_per_user)
 
 if __name__ == "__main__":
     main()

@@ -26,6 +26,7 @@ from aac_recsys.pre_processing import run_preprocess
 from aac_recsys.predict import FoldConfig, run_predict
 from aac_recsys.models.ranker_base import Ranker
 from aac_recsys.models.baseline import BaselineRanker, BaselineParams
+from aac_recsys.models.random_forest import RandomForestRanker, RandomForestParams
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,6 +50,13 @@ def parse_args() -> argparse.Namespace:
     # baseline params
     p.add_argument("--half-life-days", type=int, default=30)
 
+    # random-forest params
+    p.add_argument("--rf-n-estimators", type=int, default=300)
+    p.add_argument("--rf-max-depth", type=int, default=None)
+    p.add_argument("--rf-min-samples-leaf", type=int, default=2)
+    p.add_argument("--rf-max-features", type=str, default="sqrt")
+
+
     return p.parse_args()
 
 
@@ -59,22 +67,50 @@ def make_ranker_factory(args) -> Callable[[], Ranker]:
       rank_k_default=args.rank_k,
     )
     return lambda: BaselineRanker(params)
+  if args.model in ("random_forest", "rf"):
+    params = RandomForestParams(
+      n_estimators=args.rf_n_estimators,
+      max_depth=args.rf_max_depth,
+      min_samples_leaf=args.rf_min_samples_leaf,
+      max_features=args.rf_max_features,
+      rank_k_default=args.rank_k,
+    )
+    return lambda: RandomForestRanker(params)
+  if args.model in ("two_tower", "tt"):
+    raise NotImplementedError("Two-Tower model not yet implemented")
   raise ValueError(f"Unknown model: {args.model}")
 
 def main() -> None:
     args = parse_args()
 
+    model = args.model.replace("-", "_").lower()
+
+    if model == "baseline":
+      model = "baseline"
+    elif model in ("rf", "random_forest"):
+      model = "random_forest"
+    elif model in ("tt", "two_tower"):
+      model = "two_tower"
+    else:
+      raise ValueError(f"Unknown model: {args.model}")
+
     if args.preprocess:
       run_preprocess(
+        model=model,
         user_idx=args.preprocess_user_idx,
         force=args.preprocess_force,
         plots=args.preprocess_plots,
       )
 
-    if args.model == "baseline":
-      baseline_path = PROCESSED_DATA_DIR / "df_baseline.parquet"
-      if not baseline_path.exists():
-        logger.warning("df_baseline.parquet not found. Run with --preprocess to generate it.")
+    if model == "baseline":
+      if not list(PROCESSED_DATA_DIR.glob("user_*/baseline_processed.parquet")):
+        logger.warning("No baseline_processed.parquet found. Run with --preprocess.")
+    if model == "random_forest":
+      if not list(PROCESSED_DATA_DIR.glob("user_*/random_forest_processed.parquet")):
+        logger.warning("No random_forest_processed.parquet found. Run with --preprocess.")
+    if model == "two_tower":
+      if not list(PROCESSED_DATA_DIR.glob("user_*/two_tower_processed.parquet")):
+        logger.warning("No two_tower_processed.parquet found. Run with --preprocess.")
 
     ks = tuple(int(x.strip()) for x in args.ks.split(",") if x.strip())
 
